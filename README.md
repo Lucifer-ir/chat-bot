@@ -49,8 +49,9 @@
 1.  **کلون کردن پروژه:**
     ابتدا پروژه را از گیت‌هاب روی سرور خود کلون کنید.
     ```bash
-    git clone <Your-Repository-URL>
-    cd <repository-name>
+    git clone https://github.com/Lucifer-ir/chat-private-bot-telegram
+    cd chat-private-bot-telegram
+    cd chat_telegram_bot
     ```
 
 2.  **اجرای اسکریپت نصب:**
