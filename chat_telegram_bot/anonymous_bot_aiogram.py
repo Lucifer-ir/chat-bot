@@ -29,6 +29,8 @@ class Form(StatesGroup):
     getting_recipient_id = State()
     sending_message = State()
     getting_reply = State()
+    sending_message_to_admin = State()
+    replying_to_user = State()
     getting_broadcast_message = State()
     force_sub_add_channel = State()
     force_sub_add_link = State()
@@ -100,7 +102,7 @@ def db_get_force_sub_targets() -> list:
 main_keyboard = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="🔗 لینک ناشناس من")],
-        [KeyboardButton(text="💬 پیام‌های من"), KeyboardButton(text="📨 ارسال به کاربر")],
+        [KeyboardButton(text="📞 ارتباط با ادمین"), KeyboardButton(text="📨 ارسال به کاربر")],
     ],
     resize_keyboard=True,
 )
@@ -182,7 +184,8 @@ async def register_handlers(dp: Dispatcher):
     # User Handlers
     dp.message.register(command_start_handler, CommandStart())
     dp.message.register(get_my_link, F.text == "🔗 لینک ناشناس من")
-    dp.message.register(my_messages, F.text == "💬 پیام‌های من")
+    dp.message.register(contact_admin_start, F.text == "📞 ارتباط با ادمین")
+    dp.message.register(forward_to_admin, Form.sending_message_to_admin)
     dp.message.register(send_to_user_start, F.text == "📨 ارسال به کاربر")
     dp.message.register(get_recipient_username, Form.getting_recipient_id)
     dp.message.register(forward_anonymous_message, Form.sending_message)
@@ -192,6 +195,8 @@ async def register_handlers(dp: Dispatcher):
     dp.callback_query.register(check_sub_callback, F.data == "check_sub")
 
     # Admin Handlers
+    dp.callback_query.register(handle_admin_reply_button, F.data.startswith("admin_reply_"))
+    dp.message.register(send_admin_reply_to_user, Form.replying_to_user)
     dp.message.register(broadcast_start, F.from_user.id == ADMIN_USER_ID, F.text == "📢 پیام همگانی")
     dp.message.register(process_broadcast, F.from_user.id == ADMIN_USER_ID, Form.getting_broadcast_message)
     dp.message.register(get_user_list, F.from_user.id == ADMIN_USER_ID, F.text == "👥 لیست کاربران")
@@ -258,26 +263,35 @@ async def get_my_link(message: Message):
         "این لینک را با دیگران به اشتراک بگذارید.",
     )
 
-async def my_messages(message: Message):
-    conn = sqlite3.connect("anonymous_chat.db")
-    cursor = conn.cursor()
-    cursor.execute(
-        "SELECT m.id, u.username FROM messages m JOIN users u ON m.sender_hashed_id = u.hashed_id WHERE m.recipient_hashed_id = ? ORDER BY m.id DESC LIMIT 5",
-        (get_hashed_id(message.from_user.id, HASH_SALT),)
-    )
-    messages = cursor.fetchall()
-    conn.close()
+async def contact_admin_start(message: Message, state: FSMContext):
+    """شروع فرآیند ارسال پیام به ادمین"""
+    await state.set_state(Form.sending_message_to_admin)
+    await message.answer("پیام خود را برای ارسال به ادمین وارد کنید. می‌توانید از متن، عکس، ویدیو و... استفاده کنید.", reply_markup=ReplyKeyboardRemove())
 
-    if not messages:
-        await message.answer("شما هنوز هیچ پیام ناشناسی دریافت نکرده‌اید.")
-        return
+async def forward_to_admin(message: Message, state: FSMContext):
+    """پیام کاربر را برای ادمین ارسال می‌کند"""
+    user = message.from_user
+    user_info = f"@{user.username}" if user.username else f"کاربر {user.first_name}"
 
-    response_text = "<b>آخرین پیام‌های دریافتی شما:</b>\n\n"
-    for msg_id, sender_username in messages:
-        sender_display = f"@{sender_username}" if sender_username else "یک کاربر"
-        response_text += f"• پیامی از طرف <b>{sender_display}</b> (کد: <code>{msg_id}</code>)\n"
+    try:
+        # ایجاد دکمه پاسخ برای ادمین
+        reply_markup = InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="✍️ پاسخ به کاربر", callback_data=f"admin_reply_{user.id}")]]
+        )
 
-    await message.answer(response_text)
+        await bot.send_message(ADMIN_USER_ID, f"پیام جدید از <b>{user_info}</b> (ID: <code>{user.id}</code>):")
+        await bot.copy_message(
+            chat_id=ADMIN_USER_ID,
+            from_chat_id=message.chat.id,
+            message_id=message.message_id,
+            reply_markup=reply_markup
+        )
+        await message.answer("پیام شما با موفقیت برای ادمین ارسال شد.", reply_markup=main_keyboard)
+    except Exception as e:
+        logging.error(f"Could not forward message to admin: {e}")
+        await message.answer("خطایی در ارسال پیام به ادمین رخ داد. لطفاً بعداً تلاش کنید.", reply_markup=main_keyboard)
+    finally:
+        await state.clear()
 
 async def send_to_user_start(message: Message, state: FSMContext):
     await state.set_state(Form.getting_recipient_id)
@@ -400,6 +414,37 @@ async def cancel_handler(message: Message, state: FSMContext) -> None:
     await state.clear()
     keyboard = admin_keyboard if message.from_user.id == ADMIN_USER_ID else main_keyboard
     await message.answer("عملیات لغو شد. به منوی اصلی بازگشتید.", reply_markup=keyboard)
+
+async def handle_admin_reply_button(callback: CallbackQuery, state: FSMContext):
+    """هندلر دکمه پاسخ ادمین به کاربر"""
+    if callback.from_user.id != ADMIN_USER_ID:
+        await callback.answer("این دکمه مخصوص ادمین است.", show_alert=True)
+        return
+
+    user_id_to_reply = int(callback.data.split("_")[2])
+    await state.update_data(user_id_to_reply=user_id_to_reply)
+    await state.set_state(Form.replying_to_user)
+    await callback.message.answer(f"در حال پاسخ به کاربر با شناسه <code>{user_id_to_reply}</code>. پیام خود را ارسال کنید:")
+    await callback.answer()
+
+async def send_admin_reply_to_user(message: Message, state: FSMContext):
+    """ارسال پیام پاسخ ادمین به کاربر"""
+    data = await state.get_data()
+    user_id = data.get("user_id_to_reply")
+
+    if not user_id:
+        await message.answer("خطا: شناسه کاربر برای پاسخ مشخص نیست.", reply_markup=admin_keyboard)
+        await state.clear()
+        return
+
+    try:
+        await bot.send_message(user_id, " پاسخی از طرف ادمین دریافت کردید: ")
+        await bot.copy_message(user_id, from_chat_id=message.chat.id, message_id=message.message_id)
+        await message.answer(f"پاسخ شما برای کاربر <code>{user_id}</code> ارسال شد.", reply_markup=admin_keyboard)
+    except Exception as e:
+        await message.answer(f"ارسال پیام به کاربر <code>{user_id}</code> ناموفق بود. خطا: {e}", reply_markup=admin_keyboard)
+    finally:
+        await state.clear()
 
 async def broadcast_start(message: Message, state: FSMContext):
     await state.set_state(Form.getting_broadcast_message)
